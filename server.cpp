@@ -127,19 +127,35 @@ class Timeline
     int32_t stepCount;
 
 public:
-    // Implement these functions
-    Timeline()
+
+    Timeline(): head(nullptr), tail(nullptr), stepCount(0)
     {
+
     }
     void record(Snapshot* s)
     {
-        // add record in the timeline
+        TimelineNode* node = new TimelineNode{ s, nullptr, nullptr };
+        if (stepCount == 0)
+        {
+            head = node;
+            tail = node;
+            stepCount++;
+            return;
+        }
+
+        TimelineNode* temp = tail;
+        tail->next = node;
+        tail = node;
+        tail->prev = temp;
+        stepCount++;
     }
     TimelineNode* begin()
     {
+        return head;
     }
     int32_t getStepCount()
     {
+        return stepCount;
     }
 };
 
