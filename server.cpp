@@ -43,33 +43,72 @@ class Stack
     int32_t count;
 
 public:
-    // Implement these functions:
-    Stack()
-    { // initialize the stack
+
+    Stack(): top(nullptr), count(0)
+    { 
+
     }
     void push(const T& val)
     {
+        if (count < MAX_STACK_DEPTH)
+        {
+            Node* node = new Node{ val, nullptr };
+            if (count == 0)
+            {
+                top = node;
+                count++;
+                return;
+            }
 
-        // pushes the value on the stack if max limit is not reached yet.
+            node->next = top;
+            top = node;
+            count++;
+            return;
+        }
     }
     T pop()
     {
-        // pop the top value on the stack
+        T val = top->data;
+        if (count == 1)
+        {
+            delete top;
+            top = nullptr;
+            count--;
+            return val;
+        }
+
+        Node* temp = top->next;
+        delete top;
+        top = temp;
+        count--;
+        return val;
     }
     T& peek()
     {
-        // returns the top value on the stack
+        return top->data;
     }
     bool isEmpty()
     {
+        return count == 0;
     }
     int32_t depth()
     {
+        return count;
     }
     int32_t snapshot_into(T out[], int32_t maxLen)
     {
-        // copies every frame, top to bottom in the array given as a parameter
-        // this is what buildSnapshot() call, returns count written
+        int ct = 0;
+        Node* current = top;
+        if (top != nullptr)
+        {
+            while (current != nullptr && ct < maxLen)
+            {
+                out[ct++] = current->data;
+                current = current->next;
+            }
+        }
+
+        return ct;
     }
 };
 
