@@ -1,0 +1,19 @@
+# Visual Studio
+.vs/
+*.vcxproj.user
+
+# Build output
+Debug/
+Release/
+x64/
+x86/
+
+# Compiled files
+*.obj
+*.pdb
+*.ilk
+*.exe
+
+# Temporary files
+*.tmp
+*.log
