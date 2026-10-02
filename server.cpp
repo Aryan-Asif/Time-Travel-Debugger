@@ -190,8 +190,8 @@ void writeHeader(FILE* f, const TTDBHeader& h)
 {
     fwrite(h.magic, 1, 4, f);
     fwrite(&h.version, sizeof(int32_t), 1, f);
-
-    // placeholder for other two data members
+    fwrite(&h.stepCount, sizeof(int32_t), 1, f);
+    fwrite(&h.indexOffset, sizeof(int64_t), 1, f);
 }
 
 // resolve.bin - bookkeeping
