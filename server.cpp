@@ -211,19 +211,107 @@ struct PendingPatch
 // PASS 0x0: READING source.bin + VALIDITY CHECK
 bool readSourceLine(ifstream& in, string& out)
 {
-    // reads the next nonblank line
+    bool isBlank = true;
+    while (getline(in, out))
+    {
+        for (char c : out)
+        {
+            if (!isspace(c))
+            {
+                isBlank = false;
+                break;
+            }
+        }
+
+        if (isBlank)
+            continue;
+
+        return true;
+    }
+
+    return false;
 }
 string firstWord(const string& line)
 {
-    // returns first word from the input string
+    string result = "";
+    for (char c: line)
+    {
+        if (isspace(c))
+            break;
+
+        result += c;
+    }
+
+    return result;
 }
 string secondWord(const string& line)
 {
-    // returns the second word
+    bool firstWordDone = false;
+    string result = "";
+    for (char c: line)
+    {
+        if (isspace(c))
+        {
+            if (!firstWordDone)
+            {
+                firstWordDone = true;
+                result = "";
+                continue;
+            }
+            else
+                break;
+        }
+
+        
+
+        result += c;
+        return result;
+    }
 }
+
 bool validateProgram(const char* sourcePath)
 {
-    // for each func defined there should be exactly one func_end and no nested funcs allowed - 
+    Stack<int> st;
+    ifstream fin(sourcePath);
+    string line = "";
+    string word = "";
+    if (!fin)
+    {
+        cout << "Could not open file.\n";
+        return false;
+    }
+
+    while (readSourceLine(fin, line))
+    {
+        word = firstWord(line);
+
+        if (word == "func")
+        {
+            if (!st.isEmpty())
+            {
+                cout << "Invalid Code.\n";
+                return false;
+            }
+            st.push(1);
+            continue;
+        }
+
+        if (word == "func_end")
+        {
+            if (st.isEmpty())
+            {
+                cout << "Invalid Code.\n";
+                return false;
+            }
+            st.pop();
+            continue;
+        }
+    }
+
+     if (st.isEmpty())
+            return true;
+        else
+            return false;
 }
 
 // PASS 0x1: RESOLVE() -> resolve.bin

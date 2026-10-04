@@ -12,3 +12,18 @@ Next Session
 
 * Begin Pass 0x0: Read source.bin and implement structural validation
 * Start with readSourceLine(), firstWord(), and secondWord()
+
+---------------------------------------------------------
+
+October 4, 2026
+
+Implemented
+
+* readSourceLine(), firstWord(), and secondWord()
+* Validation of Structure of source.bin
+
+Next Session
+
+* Begin Pass 0x1 Resolve
+
+---------------------------------------------------------
