@@ -1,0 +1,16 @@
+func double x
+mul x x
+func_end
+
+func main
+set a 4
+set b 3
+call double a
+add a b
+call calc a b
+func_end
+
+func calc x y
+set z 10
+add x z
+func_end

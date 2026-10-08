@@ -12,7 +12,8 @@
 #include <string>
 #include <cstdint>
 #include <fstream>
-#include <unistd.h>
+#include <sstream>  // For reading words from string directly and swiftly during Tokenization
+#include <unistd.h> 
 #include <sys/socket.h>
 #include <cstdint>
 #include <cstdio>
@@ -22,6 +23,7 @@ using namespace std;
 const int32_t MAX_VARS_PER_FRAME = 16;
 const int32_t MAX_STACK_DEPTH = 64;
 const int32_t MAX_FUNCS = 128;
+const int32_t CALL_OFFSET_WIDTH = 20; // to avoid offset shifting during resolving
 const int32_t MAX_TOKENS = MAX_VARS_PER_FRAME + 2; // kW + func_name + upto 16 params/args
 const int32_t MAX_PATCHES = MAX_FUNCS * 4;
 const uint64_t MAX_SOURCE_BYTES = 15ULL * 1024 * 1024; // sanity cap on the declared file length
@@ -265,8 +267,8 @@ string secondWord(const string& line)
         
 
         result += c;
-        return result;
     }
+    return result;
 }
 
 bool validateProgram(const char* sourcePath)
@@ -317,12 +319,21 @@ bool validateProgram(const char* sourcePath)
 // PASS 0x1: RESOLVE() -> resolve.bin
 int64_t writeResolveRecord(FILE* f, int64_t offsetField, const string& text)
 {
-    // writes one [offset(8B)][size(4B)][string] record at the current file position
-    // returns this record's own starting byte position
+    int32_t size = text.length();
+    fwrite(&offsetField, sizeof(int64_t), 1, f);
+    fwrite(&size, sizeof(int32_t), 1, f);
+    fwrite(text.data(), 1, size, f);
+    return offsetField;
 }
 int64_t readResolveRecord(FILE* f, string& outText)
 {
-    // reads one record at the current position and advances past it, returns the offset field - the raw line text comes back untouched in outText.
+    int64_t offset;
+    int32_t size;
+    fread(&offset, sizeof(int64_t), 1, f);
+    fread(&size, sizeof(int32_t), 1, f);
+    outText.resize(size);
+    fread(outText.data(), 1, size, f);
+    return offset;
 }
 int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
 {
@@ -330,14 +341,141 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     int32_t funcCount = 0;
     PendingPatch patches[MAX_PATCHES];
     int32_t patchCount = 0;
-    // Every source line becomes one record holding the raw line, as-is.
-    // resolve() only PEEKS at the leading word(s) -- enough to spot FUNC
-    // (remember its position) and CALL (remember which function it needs
-    // and where its offset field sits).
-    // Once the whole file is written, every CALL's offset field is patched
-    // with its target's position. Patching happens after the full write
-    // Returns the byte offset of main's FUNC header record.
-    // if there is no main return the error 
+    int64_t main_offset = 0;
+    bool main_found = false;
+    ifstream fin(sourcePath);
+    FILE* fout = fopen(resolveBinPath, "wb+");
+    string line = "";
+    string first_word = "";
+    string second_word = "";
+    int64_t offset = 0;
+    if (!fin)     // Will modify to give exception after whole project
+    {
+        cout << "Could not open file.\n";
+        return -1;
+    }
+    if (!fout)  // Will modify to give exception after whole project
+    {
+        cout << "Could not open resolve file.\n";
+        return -1;
+    }       
+    while (readSourceLine(fin, line))
+    {
+        first_word = firstWord(line);
+        second_word = secondWord(line);
+
+        if (first_word == "func" && second_word == "main")
+        {
+            main_offset = offset;
+            main_found = true;
+        }
+        if (first_word == "func")
+        {
+            if (funcCount >= MAX_FUNCS)
+            {
+                cout << "Function limit exceeded";
+                return -1;
+            }
+
+            funcArray[funcCount].funcName = second_word;
+            funcArray[funcCount].byteOffsetInResolveBin = offset;
+            funcCount++;
+        }
+
+        if  (first_word == "call")
+        {
+            int64_t temp = 0;
+            bool flag = true;
+            for (int i = 0; i < funcCount; i++)
+            {
+                if (second_word == funcArray[i].funcName)
+                {
+                    flag = false;
+                    temp = funcArray[i].byteOffsetInResolveBin;
+                    break;
+                }
+            }
+
+            if (flag)
+            {
+                if (patchCount < MAX_PATCHES)
+                {
+                patches[patchCount].targetFuncName = second_word;
+                patches[patchCount].byteOffsetOfOffsetField = offset;
+                patchCount++;
+
+                size_t pos = line.find(second_word);
+                if (pos != string::npos)
+                    line.replace(pos,second_word.length(),string(CALL_OFFSET_WIDTH, '0'));
+        
+
+                writeResolveRecord(fout, offset, line);
+                offset += 8 + 4 + line.length();
+                continue;
+                }
+                else
+                {
+                    cout << "Patch limit exceeded";
+                    return -1;
+                }
+            }
+            else
+            {
+                size_t pos = line.find(second_word);
+
+                if (pos != string::npos)
+                    line.replace(pos, second_word.length(), to_string(temp));
+            }
+        }
+
+        writeResolveRecord(fout, offset, line);
+        offset += 8 + 4 + line.length();
+    }
+
+    for (int i = 0; i < patchCount; i++)
+    {
+        string patchLine = "";
+        int64_t patchOffset = patches[i].byteOffsetOfOffsetField;
+        fseek(fout, patchOffset, SEEK_SET);
+        readResolveRecord(fout, patchLine);
+        int64_t func_offset = -1;
+        for (int j = 0; j < funcCount; j++)
+        {
+            if (funcArray[j].funcName == patches[i].targetFuncName)
+            {
+                func_offset = funcArray[j].byteOffsetInResolveBin;
+                break;
+            }
+        }
+        if (func_offset == -1) // Will modify to give exception after whole project
+        {
+            cout << "Undefined Function";
+            return -1;
+        }
+
+        string offsetString = to_string(func_offset);
+        offsetString = string(CALL_OFFSET_WIDTH - offsetString.length(), '0') + offsetString;
+
+        size_t pos = patchLine.find(string(CALL_OFFSET_WIDTH, '0'));
+
+        if (pos != string::npos)
+            patchLine.replace(pos,CALL_OFFSET_WIDTH,offsetString);
+    
+        fseek(fout, patchOffset, SEEK_SET);
+        writeResolveRecord(fout, patchOffset, patchLine);
+    }
+
+    if (main_found)
+    {
+        fclose(fout);
+        return main_offset;
+    }
+    else
+    {
+        fclose(fout);
+        cout << "No Main found";
+        return -1;
+    }
 }
 
 // PASS 0x2: EXECUTION (tokenization happens here)
@@ -354,23 +492,232 @@ struct Token
 };
 int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
 {
-    // first word is always a instruction keyword
-    // instruction set = [func, func_end, call, set, add, sub, mul and div]
-    // next word is identifier like name of a function, variable name
-    // after identifier all are the params/arg, space separated
+    stringstream ss(line);
+    int32_t ct = 0;
+    string word;
+    while (ss >> word && ct < maxTokens)
+    {
+        tokens[ct].text = word;
+        if (ct == 0)
+            tokens[ct].type = KEYWORD;
+        else if (ct == 1)
+            tokens[ct].type = IDENTIFIER;
+        else
+            tokens[ct].type = PARAM;
+
+        ct++;
+    }
+
+    return ct;
 }
 Snapshot* buildSnapshot(Stack<Frame>& callStack)
 {
-    // build the snapshot based on the callStack given
+    Snapshot* snapshot = new Snapshot;
+    snapshot->stackDepth = callStack.snapshot_into(snapshot->callStack, MAX_STACK_DEPTH);
+    return snapshot;
 }
 void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
 {
-    // initialize the call stack
-    // make the main frame
-    // push main frame on the call stack
+    Stack<Frame> callStack;
+    string line = "";
+    Token tokens[MAX_TOKENS];
 
-    // implementation:
-    // execute line by line, and according to the keyword perform action
+    FILE* fin = fopen(resolveBinPath, "rb");
+    if (!fin) // Will change to exception later
+    {
+        cout << "File not opened";
+        return;
+    }
+
+    fseek(fin, mainOffset, SEEK_SET);
+
+    int64_t current_offset = readResolveRecord(fin, line);
+
+    Frame main_frame;
+    main_frame.func_name = "main";
+    main_frame.returnLine = 0;
+    main_frame.argc = 0;
+    main_frame.localCount = 0;
+
+    callStack.push(main_frame);
+
+    while (!callStack.isEmpty())
+    {
+        Frame& current_frame = callStack.peek();
+
+        current_offset = readResolveRecord(fin, line);
+
+        tokenizeLine(line, tokens, MAX_TOKENS);
+
+        string instruction = tokens[0].text;
+
+        if (instruction == "set")
+        {
+            bool flag = true;
+            int idx = -1;
+
+            for (int i = 0; i < current_frame.localCount; i++)
+            {
+                if (tokens[1].text == current_frame.locals[i].name)
+                {
+                    flag = false;
+                    idx = i;
+                    break;
+                }
+            }
+
+            if (flag)
+            {
+                Variable new_var;
+                new_var.name = tokens[1].text;
+                new_var.value = stoi(tokens[2].text);
+
+                current_frame.locals[current_frame.localCount] = new_var;
+                current_frame.localCount++;
+            }
+            else
+            {
+                current_frame.locals[idx].value = stoi(tokens[2].text);
+            }
+        }
+
+        else if (instruction == "add" || instruction == "sub" || instruction == "mul" || instruction == "div")
+        {
+            int idx1 = -1;
+            int idx2 = -1;
+
+            for (int i = 0; i < current_frame.localCount; i++)
+            {
+                if (tokens[1].text == current_frame.locals[i].name)
+                    idx1 = i;
+
+                if (tokens[2].text == current_frame.locals[i].name)
+                    idx2 = i;
+            }
+
+            if (idx1 == -1 || idx2 == -1)
+            {
+                cout << "Undefined Variable Used";
+                return;
+            }
+
+            if (instruction == "add")
+            {
+                current_frame.locals[idx1].value += current_frame.locals[idx2].value;
+            }
+            else if (instruction == "sub")
+            {
+                current_frame.locals[idx1].value -= current_frame.locals[idx2].value;
+            }
+            else if (instruction == "mul")
+            {
+                current_frame.locals[idx1].value *= current_frame.locals[idx2].value;
+            }
+            else
+            {
+                if (current_frame.locals[idx2].value == 0)
+                {
+                    cout << "Cannot divide by zero";
+                    return;
+                }
+
+                current_frame.locals[idx1].value /= current_frame.locals[idx2].value;
+            }
+        }
+
+        else if (instruction == "call")
+        {
+            int64_t callee_offset = stoi(tokens[1].text);
+
+            if (callStack.depth() >= MAX_STACK_DEPTH)
+            {
+                cout << "Stack overflow";
+                return;
+            }
+
+            Frame new_frame;
+            new_frame.argc = 0;
+            new_frame.localCount = 0;
+            new_frame.returnLine = current_offset;
+            
+            fseek(fin, callee_offset, SEEK_SET);
+            
+            string funcLine = "";
+            readResolveRecord(fin, funcLine);
+            
+            Token funcTokens[MAX_TOKENS];
+            int32_t funcTokenCount = tokenizeLine(funcLine, funcTokens, MAX_TOKENS);
+            new_frame.func_name = funcTokens[1].text;
+
+            for (int i = 2; i < funcTokenCount; i++)
+            {
+                new_frame.argv[new_frame.argc].name = tokens[i].text;
+
+                if (isdigit(tokens[i].text[0]) || (tokens[i].text[0] == '-' && tokens[i].text.size() > 1))
+                {
+                    new_frame.argv[new_frame.argc].value = stoi(tokens[i].text);
+                }
+                else
+                {
+                    bool found = false;
+
+                    for (int j = 0; j < current_frame.localCount; j++)
+                    {
+                        if (current_frame.locals[j].name == tokens[i].text)
+                        {
+                            new_frame.argv[new_frame.argc].value = current_frame.locals[j].value;
+
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if (!found)
+                    {
+                        cout << "Undefined Variable Used";
+                        return;
+                    }
+                }
+
+                new_frame.locals[new_frame.localCount].name = funcTokens[i].text;
+
+                new_frame.locals[new_frame.localCount].value = new_frame.argv[new_frame.argc].value;
+
+                new_frame.localCount++;
+                new_frame.argc++;
+            }
+
+            callStack.push(new_frame);
+        }
+
+        else if (instruction == "func_end")
+        {
+            Frame finished_frame = callStack.pop();
+
+            if (!callStack.isEmpty())
+            {
+                Frame& caller_frame = callStack.peek();
+
+                for (int i = 0; i < finished_frame.argc; i++)
+                {
+                    for (int j = 0; j < caller_frame.localCount; j++)
+                    {
+                        if (caller_frame.locals[j].name == finished_frame.argv[i].name)
+                        {
+                            caller_frame.locals[j].value = finished_frame.locals[i].value;
+
+                            break;
+                        }
+                    }
+                }
+
+                fseek(fin, finished_frame.returnLine, SEEK_SET);
+
+                readResolveRecord(fin, line);
+            }
+        }
+
+    fclose(fin);
 }
 
 // PASS 0x3: SERIALIZE TIMELINE
@@ -393,11 +740,11 @@ int32_t main()
     }
 
     int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
-
+    cout << mainOffset;
     Timeline timeline;
     executeProgram("resolve.bin", mainOffset, timeline);
 
-    writeTdbg(timeline, "session.tdbg");
+    // writeTdbg(timeline, "session.tdbg");
 
     return 0;
 }
