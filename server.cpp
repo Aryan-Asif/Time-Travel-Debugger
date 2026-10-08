@@ -712,22 +712,100 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 }
 
                 fseek(fin, finished_frame.returnLine, SEEK_SET);
-
                 readResolveRecord(fin, line);
             }
-        }
 
+        }
+    
+    Snapshot* snapshot = buildSnapshot(callStack);
+    timeline.record(snapshot);
+    }
     fclose(fin);
 }
 
 // PASS 0x3: SERIALIZE TIMELINE
 void writeTdbg(Timeline& timeline, const char* tdbgPath)
 {
-    // placeholder for header
-    // index array of the size of stepcount from the timeline
-    // placing each snapshot in the file while maintaining the index(starting point of each nth snapshot)
-    // after timeline add the index array i the file
-    // update the header
+    FILE* f = fopen(tdbgPath, "wb");
+
+    if (!f)
+    {
+        cout << "File not opened";
+        return;
+    }
+
+    TTDBHeader header;
+
+    header.magic[0] = 'T';
+    header.magic[1] = 'T';
+    header.magic[2] = 'D';
+    header.magic[3] = 'B';
+
+    header.version = 1;
+    header.stepCount = timeline.getStepCount();
+    header.indexOffset = 0;
+    writeHeader(f, header);
+
+    int64_t* index = new int64_t[header.stepCount];
+
+
+    TimelineNode* current = timeline.begin();
+
+    for (int32_t i = 0; i < header.stepCount; i++) {
+    index[i] = ftell(f);
+
+    Snapshot* snapshot = current->data;
+
+    fwrite(&snapshot->stackDepth, sizeof(int32_t), 1, f);
+
+    for (int j = 0; j < snapshot->stackDepth; j++)
+    {
+        Frame& frame = snapshot->callStack[j];
+
+        int32_t funcNameSize = frame.func_name.length();
+        fwrite(&funcNameSize, sizeof(int32_t), 1, f);
+        fwrite(frame.func_name.data(), 1, funcNameSize, f);
+
+        fwrite(&frame.argc, sizeof(int32_t), 1, f);
+
+        for (int k = 0; k < frame.argc; k++)
+        {
+            int32_t nameSize = frame.argv[k].name.length();
+            fwrite(&nameSize, sizeof(int32_t), 1, f);
+            fwrite(frame.argv[k].name.data(), 1, nameSize, f);
+
+            fwrite(&frame.argv[k].value, sizeof(int32_t), 1, f);
+        }
+
+        fwrite(&frame.returnLine, sizeof(int32_t), 1, f);
+
+        fwrite(&frame.localCount, sizeof(int32_t), 1, f);
+
+        for (int k = 0; k < frame.localCount; k++)
+        {
+            int32_t nameSize = frame.locals[k].name.length();
+            fwrite(&nameSize, sizeof(int32_t), 1, f);
+            fwrite(frame.locals[k].name.data(), 1, nameSize, f);
+
+            fwrite(&frame.locals[k].value, sizeof(int32_t), 1, f);
+        }
+    }
+
+    current = current->next;
+}
+
+
+    header.indexOffset = ftell(f);
+
+    fwrite(index, sizeof(int64_t), header.stepCount, f);
+
+    fseek(f, 0, SEEK_SET);
+
+    writeHeader(f, header);
+
+    delete[] index;
+
+    fclose(f);
 }
 // main section
 int32_t main()
@@ -740,11 +818,10 @@ int32_t main()
     }
 
     int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
-    cout << mainOffset;
     Timeline timeline;
     executeProgram("resolve.bin", mainOffset, timeline);
 
-    // writeTdbg(timeline, "session.tdbg");
+    writeTdbg(timeline, "session.tdbg");
 
     return 0;
 }
