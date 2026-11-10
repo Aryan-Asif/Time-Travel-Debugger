@@ -52,3 +52,15 @@ Next Session
 * Convert all temporary cout errors to actual Exceptions errors
 
 ---------------------------------------------------------
+
+November 11, 2026
+
+Implemented
+
+* Added modifications in server.cpp
+
+Next Session
+
+* load_balancer.cpp and client.cpp
+
+---------------------------------------------------------

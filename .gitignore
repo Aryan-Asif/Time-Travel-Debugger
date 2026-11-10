@@ -18,4 +18,14 @@ x86/
 *.tmp
 *.log
 
+
+# compiled programs
 server
+client
+load_balancer
+
+# files created while running
+resolve.bin
+received_source.bin
+session.tdbg
+*.tdbg

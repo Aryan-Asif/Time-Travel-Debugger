@@ -17,18 +17,22 @@
 #include <sys/socket.h>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>   // runtime_error (errors are thrown as exceptions)
+#include <sys/time.h>
+#include <netinet/in.h>
+#include "helper.h"    // shared structs, constants and checksum code
 using namespace std;
 
 // ---- Constants ----
-const int32_t MAX_VARS_PER_FRAME = 16;
-const int32_t MAX_STACK_DEPTH = 64;
+// MAX_VARS_PER_FRAME, MAX_STACK_DEPTH and IO_BUFFER_SIZE now live in helper.h
 const int32_t MAX_FUNCS = 128;
 const int32_t CALL_OFFSET_WIDTH = 20; // to avoid offset shifting during resolving
 const int32_t MAX_TOKENS = MAX_VARS_PER_FRAME + 2; // kW + func_name + upto 16 params/args
 const int32_t MAX_PATCHES = MAX_FUNCS * 4;
 const uint64_t MAX_SOURCE_BYTES = 15ULL * 1024 * 1024; // sanity cap on the declared file length
-const int32_t IO_BUFFER_SIZE = 64 * 1024;                  // fixed buffer for streaming to/from disk
-const int32_t SOCKET_TIMEOUT_SEC = 5;                      // TODO: apply as SO_RCVTIMEO so a deadclient can't hang the server forever
+const int32_t SOCKET_TIMEOUT_SEC = 5;                      // applied as SO_RCVTIMEO on the client socket (see main)
 
 // ---- Custom data structures
 
@@ -162,32 +166,7 @@ public:
 };
 
 // Core structs
-struct Variable
-{
-    string name;
-    int32_t value;
-};
-struct Frame
-{
-    string func_name;
-    int32_t argc;
-    Variable argv[MAX_VARS_PER_FRAME];
-    int32_t returnLine;
-    Variable locals[MAX_VARS_PER_FRAME];
-    int32_t localCount;
-};
-struct Snapshot
-{
-    Frame callStack[MAX_STACK_DEPTH];
-    int32_t stackDepth;
-};
-struct TTDBHeader
-{
-    char magic[4]; // "TTDB"
-    int32_t version;
-    int32_t stepCount;
-    int64_t indexOffset;
-};
+// Variable, Frame, Snapshot and TTDBHeader are now in helper.h (the client needs them too)
 void writeHeader(FILE* f, const TTDBHeader& h)
 {
     fwrite(h.magic, 1, 4, f);
@@ -196,17 +175,7 @@ void writeHeader(FILE* f, const TTDBHeader& h)
     fwrite(&h.indexOffset, sizeof(int64_t), 1, f);
 }
 
-// resolve.bin - bookkeeping
-struct FuncEntry
-{
-    string funcName;
-    int64_t byteOffsetInResolveBin; // where this function's FUNC header record sits
-};
-struct PendingPatch
-{
-    int64_t byteOffsetOfOffsetField; // where in resolve.bin to seek back and overwrite
-    string targetFuncName;
-};
+// resolve.bin - bookkeeping: FuncEntry and PendingPatch are now in helper.h
 
 
 
@@ -279,8 +248,7 @@ bool validateProgram(const char* sourcePath)
     string word = "";
     if (!fin)
     {
-        cout << "Could not open file.\n";
-        return false;
+        throw runtime_error("Could not open file.");
     }
 
     while (readSourceLine(fin, line))
@@ -291,8 +259,7 @@ bool validateProgram(const char* sourcePath)
         {
             if (!st.isEmpty())
             {
-                cout << "Invalid Code.\n";
-                return false;
+                throw runtime_error("Invalid Code: nested func declaration (func inside another func).");
             }
             st.push(1);
             continue;
@@ -302,8 +269,7 @@ bool validateProgram(const char* sourcePath)
         {
             if (st.isEmpty())
             {
-                cout << "Invalid Code.\n";
-                return false;
+                throw runtime_error("Invalid Code: func_end without a matching func.");
             }
             st.pop();
             continue;
@@ -313,7 +279,7 @@ bool validateProgram(const char* sourcePath)
      if (st.isEmpty())
             return true;
         else
-            return false;
+            throw runtime_error("Invalid Code: func without a matching func_end.");
 }
 
 // PASS 0x1: RESOLVE() -> resolve.bin
@@ -349,16 +315,16 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     string first_word = "";
     string second_word = "";
     int64_t offset = 0;
-    if (!fin)     // Will modify to give exception after whole project
+    if (!fin)
     {
-        cout << "Could not open file.\n";
-        return -1;
+        if (fout)
+            fclose(fout);
+        throw runtime_error("Could not open file.");
     }
-    if (!fout)  // Will modify to give exception after whole project
+    if (!fout)
     {
-        cout << "Could not open resolve file.\n";
-        return -1;
-    }       
+        throw runtime_error("Could not open resolve file.");
+    }
     while (readSourceLine(fin, line))
     {
         first_word = firstWord(line);
@@ -373,8 +339,8 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
         {
             if (funcCount >= MAX_FUNCS)
             {
-                cout << "Function limit exceeded";
-                return -1;
+                fclose(fout);
+                throw runtime_error("Function limit exceeded");
             }
 
             funcArray[funcCount].funcName = second_word;
@@ -404,7 +370,7 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
                 patches[patchCount].byteOffsetOfOffsetField = offset;
                 patchCount++;
 
-                size_t pos = line.find(second_word);
+                size_t pos = line.find(second_word, first_word.length()); // search after the word "call", so a function named "a" or "c" is not found inside "call"
                 if (pos != string::npos)
                     line.replace(pos,second_word.length(),string(CALL_OFFSET_WIDTH, '0'));
         
@@ -415,13 +381,13 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
                 }
                 else
                 {
-                    cout << "Patch limit exceeded";
-                    return -1;
+                    fclose(fout);
+                    throw runtime_error("Patch limit exceeded");
                 }
             }
             else
             {
-                size_t pos = line.find(second_word);
+                size_t pos = line.find(second_word, first_word.length()); // search after the word "call", so a function named "a" or "c" is not found inside "call"
 
                 if (pos != string::npos)
                     line.replace(pos, second_word.length(), to_string(temp));
@@ -447,10 +413,10 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
                 break;
             }
         }
-        if (func_offset == -1) // Will modify to give exception after whole project
+        if (func_offset == -1)
         {
-            cout << "Undefined Function";
-            return -1;
+            fclose(fout);
+            throw runtime_error("Undefined Function: call to function '" + patches[i].targetFuncName + "'");
         }
 
         string offsetString = to_string(func_offset);
@@ -473,8 +439,7 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     else
     {
         fclose(fout);
-        cout << "No Main found";
-        return -1;
+        throw runtime_error("No Main found");
     }
 }
 
@@ -523,10 +488,9 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
     Token tokens[MAX_TOKENS];
 
     FILE* fin = fopen(resolveBinPath, "rb");
-    if (!fin) // Will change to exception later
+    if (!fin)
     {
-        cout << "File not opened";
-        return;
+        throw runtime_error("Could not open resolve file.");
     }
 
     fseek(fin, mainOffset, SEEK_SET);
@@ -597,8 +561,8 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 
             if (idx1 == -1 || idx2 == -1)
             {
-                cout << "Undefined Variable Used";
-                return;
+                fclose(fin);
+                throw runtime_error("Undefined Variable Used");
             }
 
             if (instruction == "add")
@@ -617,8 +581,8 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
             {
                 if (current_frame.locals[idx2].value == 0)
                 {
-                    cout << "Cannot divide by zero";
-                    return;
+                    fclose(fin);
+                    throw runtime_error("Cannot divide by zero");
                 }
 
                 current_frame.locals[idx1].value /= current_frame.locals[idx2].value;
@@ -631,8 +595,8 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 
             if (callStack.depth() >= MAX_STACK_DEPTH)
             {
-                cout << "Stack overflow";
-                return;
+                fclose(fin);
+                throw runtime_error("Stack overflow");
             }
 
             Frame new_frame;
@@ -674,8 +638,8 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 
                     if (!found)
                     {
-                        cout << "Undefined Variable Used";
-                        return;
+                        fclose(fin);
+                        throw runtime_error("Undefined Variable Used");
                     }
                 }
 
@@ -730,8 +694,7 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
 
     if (!f)
     {
-        cout << "File not opened";
-        return;
+        throw runtime_error("Could not create the .tdbg file.");
     }
 
     TTDBHeader header;
@@ -807,21 +770,227 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
 
     fclose(f);
 }
-// main section
-int32_t main()
-{
 
-    if (!validateProgram("source.bin"))
+// =============================================================================================
+// PHASE 2: NETWORK PART (stage 0 receive + sending the reply)
+// The load balancer starts us with "./server <port> &" and sends one client at a time.
+// Message format on the wire: [status: 1 byte][body][CRC-32: 4 bytes]
+//   upload from client:  status 0, body = source code
+//   our reply:           status 0, body = .tdbg file     OR     status 1, body = error text
+// =============================================================================================
+
+const int DEFAULT_PORT = 5001;
+// The upload is saved under its own name so it never overwrites the client's own source.bin
+// when everything runs in one folder.
+const char *SOURCE_PATH = "received_source.bin";
+const char *RESOLVE_PATH = "resolve.bin";
+const char *TDBG_PATH = "session.tdbg";
+
+bool sendAll(int sock, const char *buf, size_t n)
+{
+    size_t sent = 0;
+    while (sent < n)
     {
-        // send an error response instead of a .tdbg file
-        return 1;
+        ssize_t r = send(sock, buf + sent, n - sent, MSG_NOSIGNAL);
+        if (r <= 0)
+            return false;
+        sent += r;
+    }
+    return true;
+}
+
+int createListenSocket(int port)
+{
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0)
+        throw runtime_error("socket() failed");
+
+    int yes = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+    sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(port);
+
+    if (bind(sock, (sockaddr *)&addr, sizeof(addr)) < 0)
+    {
+        close(sock);
+        throw runtime_error("bind() failed, is the port already used?");
+    }
+    if (listen(sock, 8) < 0)
+    {
+        close(sock);
+        throw runtime_error("listen() failed");
+    }
+    return sock;
+}
+
+// Stage 0: read [status][source][crc] until the client side is closed, save the source to disk.
+// Throws if anything is wrong.
+void receiveSource(int sock, const char *path)
+{
+    char status;
+    if (recv(sock, &status, 1, MSG_WAITALL) != 1)
+        throw runtime_error("nothing received from the client");
+    if (status != 0)
+        throw runtime_error("unexpected status byte in the upload");
+
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        throw runtime_error("server could not create the source file");
+
+    TrailerChecker checker;
+    checker.addStatus(status);
+
+    char in[IO_BUFFER_SIZE];
+    char out[IO_BUFFER_SIZE];
+    uint64_t total = 0;
+
+    while (true)
+    {
+        ssize_t n = recv(sock, in, IO_BUFFER_SIZE, 0);
+        if (n < 0)
+        {
+            fclose(f);
+            throw runtime_error("connection error or timeout while receiving the source");
+        }
+        if (n == 0)
+            break; // the other side finished sending
+
+        int released = checker.feed(in, n, out);
+        total += released;
+        if (total > MAX_SOURCE_BYTES)
+        {
+            fclose(f);
+            throw runtime_error("source file is too big");
+        }
+        fwrite(out, 1, released, f);
+    }
+    fclose(f);
+
+    if (!checker.verify())
+        throw runtime_error("upload checksum mismatch");
+}
+
+bool sendErrorReply(int sock, const string &message)
+{
+    char status = 1;
+    Crc32 crc;
+    crc.add(&status, 1);
+    crc.add(message.data(), message.size());
+    uint32_t sum = crc.result();
+
+    if (!sendAll(sock, &status, 1))
+        return false;
+    if (!sendAll(sock, message.data(), message.size()))
+        return false;
+    return sendAll(sock, (const char *)&sum, 4);
+}
+
+bool sendTdbgReply(int sock, const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return sendErrorReply(sock, "server could not open the .tdbg file");
+
+    char status = 0;
+    Crc32 crc;
+    crc.add(&status, 1);
+    bool ok = sendAll(sock, &status, 1);
+
+    char buffer[IO_BUFFER_SIZE];
+    while (ok)
+    {
+        size_t n = fread(buffer, 1, IO_BUFFER_SIZE, f);
+        if (n == 0)
+            break;
+        crc.add(buffer, n);
+        ok = sendAll(sock, buffer, n);
+    }
+    fclose(f);
+
+    if (!ok)
+        return false;
+    uint32_t sum = crc.result();
+    return sendAll(sock, (const char *)&sum, 4);
+}
+
+// The server stays alive between clients, so the snapshots must be freed after every request.
+void freeTimeline(Timeline &timeline)
+{
+    TimelineNode *current = timeline.begin();
+    while (current != nullptr)
+    {
+        TimelineNode *next = current->next;
+        delete current->data;
+        delete current;
+        current = next;
+    }
+}
+
+// One whole request: receive, run the 4 passes, reply. Never throws.
+void handleClient(int sock)
+{
+    Timeline timeline;
+    try
+    {
+        receiveSource(sock, SOURCE_PATH);                                    // stage 0
+        validateProgram(SOURCE_PATH);                                        // pass 0x0
+        int64_t mainOffset = resolveProgram(SOURCE_PATH, RESOLVE_PATH);      // pass 0x1
+        executeProgram(RESOLVE_PATH, mainOffset, timeline);                  // pass 0x2
+        writeTdbg(timeline, TDBG_PATH);                                      // pass 0x3
+    }
+    catch (const exception &e)
+    {
+        cout << "request failed: " << e.what() << endl;
+        freeTimeline(timeline);
+        sendErrorReply(sock, e.what());
+        return;
     }
 
-    int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
-    Timeline timeline;
-    executeProgram("resolve.bin", mainOffset, timeline);
+    cout << "request ok: " << timeline.getStepCount() << " steps, sending .tdbg" << endl;
+    freeTimeline(timeline);
+    sendTdbgReply(sock, TDBG_PATH);
+}
 
-    writeTdbg(timeline, "session.tdbg");
+// main section
+int main(int argc, char *argv[])
+{
+    int port = DEFAULT_PORT;
+    if (argc > 1)
+        port = atoi(argv[1]);
 
+    int listenSock = -1;
+    try
+    {
+        listenSock = createListenSocket(port);
+    }
+    catch (const exception &e)
+    {
+        cout << "server could not start: " << e.what() << endl;
+        return 1;
+    }
+    cout << "server listening on port " << port << endl;
+
+    while (true)
+    {
+        int client = accept(listenSock, NULL, NULL);
+        if (client < 0)
+        {
+            usleep(100 * 1000);
+            continue;
+        }
+
+        // a client that goes silent must not hang the server forever
+        timeval tv;
+        tv.tv_sec = SOCKET_TIMEOUT_SEC;
+        tv.tv_usec = 0;
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+        handleClient(client);
+        close(client);
+    }
     return 0;
 }
