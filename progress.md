@@ -64,3 +64,11 @@ Next Session
 * load_balancer.cpp and client.cpp
 
 ---------------------------------------------------------
+
+November 11, 2026
+
+Implemented
+
+* Added load_balancer.cpp, helper.cpp and client.cpp
+
+---------------------------------------------------------
